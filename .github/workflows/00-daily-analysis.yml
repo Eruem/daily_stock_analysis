@@ -35,7 +35,10 @@ jobs:
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
     # 添加超时限制，防止任务卡死
-    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    # 默认 90 分钟：14 只自选股在 MAX_WORKERS=3 下通常 40-60 分钟完成，
+    # 叠加数据源断连重试与 LLM 偶发慢响应，30 分钟容易超时被取消。
+    # 可通过 Repository variable ANALYSIS_TIMEOUT_MINUTES 覆盖。
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '90') }}
     
     steps:
       - name: 随机延迟（避免固定时间访问）
@@ -396,12 +399,16 @@ jobs:
           MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
           ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          # 完整性补全重试：默认 0（LLM 偶发返回空响应/无效 JSON，重试只会反复失败浪费时间；
+          # 需要时可通过 Repository variable REPORT_INTEGRITY_RETRY 覆盖为 1）
+          REPORT_INTEGRITY_RETRY: ${{ vars.REPORT_INTEGRITY_RETRY || secrets.REPORT_INTEGRITY_RETRY || '0' }}
           
           # ==========================================
           # 系统配置
           # ==========================================
           LOG_LEVEL: INFO
-          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          # 并发数：默认 3（代码默认值，仍是低并发防封禁）。此前压到 1 导致 14 只股票串行、极易超时。
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '3' }}
           # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
           ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
           # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
