@@ -1,9 +1,9 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 每天北京时间 08:00 (UTC 00:00)，盘前生成当日分析
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '0 0 * * 1-5'     # 周一到周五，UTC 00:00 = 北京时间 08:00
   
   # 手动触发
   workflow_dispatch:
@@ -533,7 +533,20 @@ jobs:
             reports/
             logs/
           retention-days: 30
-      
+
+      - name: 提交报告到仓库（供本地自动拉取）
+        if: always()
+        run: |
+          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -f reports/
+            git commit -m "chore: 更新每日分析报告 $(date +%Y%m%d)" || echo "无新增报告"
+            git push origin "HEAD:${GITHUB_REF_NAME}" 2>&1 || echo "⚠️ 推送报告失败（可能需要手动处理）"
+          else
+            echo "无报告文件，跳过提交"
+          fi
+
       - name: 显示运行结果
         if: always()
         run: |
