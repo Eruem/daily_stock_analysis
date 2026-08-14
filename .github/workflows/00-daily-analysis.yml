@@ -398,6 +398,8 @@ jobs:
           SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
           MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
           ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}
+          # 个股分析失败自动重试次数（LLM 偶发无效 JSON/空响应时重试；0=不重试，默认 1）
+          ANALYSIS_RETRY: ${{ vars.ANALYSIS_RETRY || secrets.ANALYSIS_RETRY || '1' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
           # 完整性补全重试：默认 0（LLM 偶发返回空响应/无效 JSON，重试只会反复失败浪费时间；
           # 需要时可通过 Repository variable REPORT_INTEGRITY_RETRY 覆盖为 1）

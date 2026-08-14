@@ -973,6 +973,9 @@ class Config:
     # 分析间隔时间（秒）- 用于避免API限流
     analysis_delay: float = 0.0  # 个股分析与大盘分析之间的延迟
 
+    # 个股分析失败自动重试次数（LLM 偶发输出无效 JSON/空响应时重试；0=不重试）
+    analysis_retry: int = 1
+
     # Merge stock + market report into one notification (Issue #190)
     merge_email_notification: bool = False
 
@@ -1917,6 +1920,7 @@ class Config:
             report_integrity_retry=parse_env_int(os.getenv('REPORT_INTEGRITY_RETRY'), 1, field_name='REPORT_INTEGRITY_RETRY', minimum=0),
             report_history_compare_n=parse_env_int(os.getenv('REPORT_HISTORY_COMPARE_N'), 0, field_name='REPORT_HISTORY_COMPARE_N', minimum=0),
             analysis_delay=parse_env_float(os.getenv('ANALYSIS_DELAY'), 0.0, field_name='ANALYSIS_DELAY', minimum=0.0),
+            analysis_retry=parse_env_int(os.getenv('ANALYSIS_RETRY'), 1, field_name='ANALYSIS_RETRY', minimum=0),
             merge_email_notification=os.getenv('MERGE_EMAIL_NOTIFICATION', 'false').lower() == 'true',
             feishu_max_bytes=parse_env_int(os.getenv('FEISHU_MAX_BYTES'), 20000, field_name='FEISHU_MAX_BYTES', minimum=1),
             feishu_send_as_file=os.getenv('FEISHU_SEND_AS_FILE', '').lower() in ('true', '1', 'yes'),

@@ -3082,13 +3082,29 @@ class StockAnalysisPipeline:
             analyze_kwargs = {"query_id": effective_query_id}
             if current_time is not None:
                 analyze_kwargs["current_time"] = current_time
+            # 失败自动重试：LLM 偶发返回无效 JSON/空响应时重试，显著降低丢股率（ANALYSIS_RETRY 控制，默认 1）
+            retry_limit = int(getattr(self.config, 'analysis_retry', 1) or 0)
             result = self.analyze_stock(code, report_type, **analyze_kwargs)
+            attempt = 1
+            while result and not result.success and attempt <= retry_limit:
+                logger.warning(
+                    f"[{code}] 第 {attempt} 次分析未成功({result.error_message or '未知原因'})，自动重试"
+                )
+                result = self.analyze_stock(code, report_type, **analyze_kwargs)
+                attempt += 1
+            retried = attempt > 1
             
             if result and result.success:
-                logger.info(
-                    f"[{code}] 分析完成: {result.operation_advice}, "
-                    f"评分 {result.sentiment_score}"
-                )
+                if retried:
+                    logger.info(
+                        f"[{code}] 重试后分析成功: {result.operation_advice}, "
+                        f"评分 {result.sentiment_score}"
+                    )
+                else:
+                    logger.info(
+                        f"[{code}] 分析完成: {result.operation_advice}, "
+                        f"评分 {result.sentiment_score}"
+                    )
                 
                 # 单股推送模式（#55）：每分析完一只股票立即推送
                 if single_stock_notify:
