@@ -4413,7 +4413,14 @@ class GeminiAnalyzer:
         try:
             data = self._load_analysis_json_candidate(stripped)
         except json.JSONDecodeError as exc:
-            if self._contains_embedded_json_object(text):
+            embedded = self._find_embedded_json_objects(text)
+            if len(embedded) == 1:
+                # 正文中嵌入唯一一个 JSON 对象（模型在 JSON 前后夹带说明文字）：
+                # 直接提取该对象，避免被误判为 ambiguous_json 而丢股。
+                json_str = embedded[0]
+                data = self._load_analysis_json_candidate(json_str)
+                return json_str, data
+            if embedded:
                 raise ValueError("ambiguous_json") from exc
             raise
         return stripped, data
@@ -4456,6 +4463,30 @@ class GeminiAnalyzer:
             if count > 1 or before or after:
                 return True
         return False
+
+    @staticmethod
+    def _find_embedded_json_objects(text: str) -> List[str]:
+        """Return top-level JSON object strings embedded within prose text.
+
+        Only maximal (top-level) objects are returned: nested objects inside an
+        already-extracted object are skipped, so ``prose {...{...}...} prose``
+        yields exactly one candidate, while two unrelated objects yield two.
+        """
+        decoder = json.JSONDecoder()
+        candidates: List[str] = []
+        covered_until = -1
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            if index < covered_until:
+                continue
+            try:
+                _obj, end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            candidates.append(text[index:index + end])
+            covered_until = index + end
+        return candidates
 
     def _validate_analysis_minimal_contract(self, data: Dict[str, Any]) -> None:
         try:
