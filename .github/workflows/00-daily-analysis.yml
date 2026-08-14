@@ -524,6 +524,26 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
       
+      - name: 检查分析失败
+        id: check-failures
+        if: always()
+        run: |
+          LOG=$(ls logs/stock_analysis_*.log 2>/dev/null | head -1)
+          if [ -z "$LOG" ]; then
+            echo "⚠️ 未找到日志，跳过失败检查"
+            echo "failure_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FAIL_COUNT=$(grep -c "分析结果标记为失败" "$LOG" 2>/dev/null || true)
+          echo "failure_count=${FAIL_COUNT:-0}" >> "$GITHUB_OUTPUT"
+          if [ "${FAIL_COUNT:-0}" -gt 0 ]; then
+            echo "⚠️ 有 ${FAIL_COUNT} 只股票分析失败（未计入报告）:"
+            grep "分析结果标记为失败" "$LOG" | sed -E 's/.*\[([0-9]{6})\].*/\1/' | sort -u
+            echo "::warning::有 ${FAIL_COUNT} 只股票分析失败，未计入报告，请检查 DeepSeek 余额或模型输出"
+          else
+            echo "✅ 全部股票分析成功"
+          fi
+      
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()
@@ -554,6 +574,7 @@ jobs:
           echo "=========================================="
           echo "📊 分析完成"
           echo "=========================================="
+          echo "❌ 失败股票数: ${{ steps.check-failures.outputs.failure_count }}"
           if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
             echo "生成的报告:"
             ls -la reports/

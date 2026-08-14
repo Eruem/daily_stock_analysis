@@ -112,6 +112,22 @@ def classify_litellm_generation_param_error(
     return None
 
 
+def _is_json_mode_unsupported_error(error: BaseException) -> bool:
+    """Return True only for provider errors that clearly reject response_format / JSON mode."""
+    text = _normalized_error_text(error)
+    if not text:
+        return False
+    if "timeout" in text or "timed out" in text or "readtimeout" in text:
+        return False
+    return (
+        "response_format" in text
+        or "json mode" in text
+        or "json_object" in text
+        or ("not support" in text and "json" in text)
+        or ("unsupported" in text and "json" in text)
+    )
+
+
 def call_litellm_with_param_recovery(
     call: Callable[[Dict[str, Any]], Any],
     *,
@@ -128,6 +144,34 @@ def call_litellm_with_param_recovery(
         return call(effective_kwargs)
     except Exception as exc:
         recovery = classify_litellm_generation_param_error(exc)
+        if (
+            recovery is None
+            and "response_format" in effective_kwargs
+            and _is_json_mode_unsupported_error(exc)
+        ):
+            # 某些 provider 不支持 response_format=json_object：去掉该参数重试一次，
+            # 并缓存恢复策略，避免后续请求重复携带该参数。
+            retry_kwargs = dict(effective_kwargs)
+            retry_kwargs.pop("response_format", None)
+            if logger is not None:
+                logger.warning(
+                    "%s %s JSON mode not supported by provider (%s), retrying once without response_format",
+                    log_label,
+                    model,
+                    str(exc)[:120],
+                )
+            response = call(retry_kwargs)
+            if cache_recovery:
+                remember_litellm_generation_param_recovery(
+                    model,
+                    GenerationParamRecovery(
+                        omit_params=("response_format",),
+                        reason="json_mode_unsupported",
+                    ),
+                    model_list=model_list,
+                    request_overrides=retry_kwargs,
+                )
+            return response
         if recovery is None:
             raise
         retry_kwargs = apply_litellm_param_recovery(effective_kwargs, recovery)

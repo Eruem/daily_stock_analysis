@@ -3193,6 +3193,11 @@ class GeminiAnalyzer:
                         call_kwargs.update(extra_litellm_params(model, config))
                     except AttributeError:
                         pass
+                # 主分析期望 JSON 输出：对 OpenAI 兼容（含 DeepSeek）启用 JSON 模式，
+                # 显著降低模型输出“正文+代码块”导致的 ambiguous_json 失败。
+                # Hermes/本地路由不支持该参数时跳过；若 provider 拒绝，容错逻辑会去掉重试。
+                if response_validator is not None and not origins.has_hermes:
+                    call_kwargs["response_format"] = {"type": "json_object"}
                 call_kwargs = apply_litellm_generation_params(
                     call_kwargs,
                     model,
@@ -4384,13 +4389,22 @@ class GeminiAnalyzer:
             raise ValueError("ambiguous_json")
         if len(fenced_matches) == 1:
             match = fenced_matches[0]
+            json_str = match.group("body").strip()
+            fence_lang = (match.group("lang") or "").strip().lower()
             outside = (text[:match.start()] + text[match.end():]).strip()
+            # 模型常把 JSON 放进 ```json 代码块，并在代码块前后附带说明文字；
+            # 只要代码块标注为 json 且内容可解析，就直接采纳（原先会被误判为 ambiguous_json 而丢股）。
+            # 泛型代码块 / 非 json 语言代码块仍按原逻辑判歧义，避免误提取。
+            if fence_lang == "json" and outside:
+                try:
+                    data = self._load_analysis_json_candidate(json_str)
+                    return json_str, data
+                except (ValueError, TypeError):
+                    pass
             if outside:
                 raise ValueError("ambiguous_json")
-            fence_lang = (match.group("lang") or "").strip().lower()
             if fence_lang not in {"", "json"}:
                 raise ValueError("ambiguous_json")
-            json_str = match.group("body").strip()
             data = self._load_analysis_json_candidate(json_str)
             return json_str, data
         if "```" in text:
