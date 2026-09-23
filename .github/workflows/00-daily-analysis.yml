@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      stocks:
+        description: '自定义标的（留空用仓库配置）；加密货币示例: BTCUSDT,ETHUSDT,SOLUSDT'
+        required: false
+        default: ''
+        type: string
 
 # 并发控制：同一时间只运行一个分析任务
 concurrency:
@@ -427,6 +432,12 @@ jobs:
             export STOCK_LIST="$STOCK_LIST_CONFIG"
           elif [ -z "${STOCK_LIST:-}" ]; then
             export STOCK_LIST="600519"
+          fi
+
+          # 手动指定标的（workflow_dispatch 输入），留空则使用仓库配置
+          if [ -n "${{ github.event.inputs.stocks }}" ]; then
+            export STOCK_LIST="${{ github.event.inputs.stocks }}"
+            echo "🎯 手动指定标的: $STOCK_LIST"
           fi
 
           # 处理 LITELLM YAML 配置文件

@@ -12,19 +12,23 @@ Fixes: https://github.com/ZhuLinsen/daily_stock_analysis/issues/644
 import re
 from typing import Optional
 
-from src.services.market_symbol_utils import get_suffix_market
+from src.services.market_symbol_utils import get_suffix_market, is_crypto_symbol
 
 
 def detect_market(stock_code: Optional[str]) -> str:
     """Detect market from stock code.
 
     Returns:
-        One of 'cn', 'hk', 'us', or 'cn' as fallback.
+        One of 'cn', 'hk', 'us', 'crypto', or 'cn' as fallback.
     """
     if not stock_code:
         return "cn"
 
     code = stock_code.strip().upper()
+
+    # Cryptocurrency pairs (Binance spot style: BTCUSDT / ETHBTC)
+    if is_crypto_symbol(code):
+        return "crypto"
 
     # HK stocks: HK00700, 00700.HK, or 5-digit pure numbers
     if code.startswith("HK") or code.endswith(".HK"):
@@ -77,6 +81,10 @@ _MARKET_ROLES = {
     "tw": {
         "zh": "台股",
         "en": "Taiwan stock",
+    },
+    "crypto": {
+        "zh": "加密货币",
+        "en": "Cryptocurrency",
     },
 }
 
@@ -144,6 +152,20 @@ _MARKET_GUIDELINES = {
             "electronics-foundry supply chain, the three institutional investor groups (foreign / "
             "investment-trust / dealer), margin trading and day trading, and the TWSE/TPEx ±10% daily "
             "price limit; do not apply China A-share-specific concepts such as Northbound flows or Dragon Tiger lists."
+        ),
+    },
+    "crypto": {
+        "zh": (
+            "- 本次分析对象为 **加密货币**（币安现货交易对，如 BTCUSDT / ETHUSDT，以 USDT 计价）。\n"
+            "- 加密货币 24/7 连续交易，**无涨跌停、无 T+1、无开收盘概念**；请关注美元流动性、"
+            "美联储与宏观风险偏好、美元指数（DXY）、比特币现货 ETF 资金流、链上数据与监管消息等驱动因素。\n"
+            "- 不要套用 A 股专属概念（涨跌停、北向资金、龙虎榜、融资融券、T+1、板块/概念排行等）。"
+        ),
+        "en": (
+            "- This analysis covers a **cryptocurrency** (Binance spot pair such as BTCUSDT / ETHUSDT, quoted in USDT).\n"
+            "- Crypto trades 24/7 with **no daily price limits, no T+1, and no market open/close**; focus on USD liquidity, "
+            "Fed policy and macro risk appetite, the US dollar index (DXY), spot BTC ETF flows, on-chain data, and regulatory news.\n"
+            "- Do not apply China A-share concepts such as price limits, Northbound flows, Dragon Tiger lists, margin financing, T+1, or sector/concept rankings."
         ),
     },
 }

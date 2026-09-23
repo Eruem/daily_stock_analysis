@@ -43,7 +43,9 @@ from .yfinance_fetcher import YfinanceFetcher
 from .longbridge_fetcher import LongbridgeFetcher
 from .finnhub_fetcher import FinnhubFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher
+from .binance_fetcher import BinanceFetcher
 from .us_index_mapping import is_us_index_code, is_us_stock_code, get_us_index_yf_symbol, US_INDEX_MAPPING
+from src.services.market_symbol_utils import is_crypto_symbol
 
 __all__ = [
     'BaseFetcher',
@@ -58,9 +60,11 @@ __all__ = [
     'LongbridgeFetcher',
     'FinnhubFetcher',
     'AlphaVantageFetcher',
+    'BinanceFetcher',
     'is_us_index_code',
     'is_us_stock_code',
     'is_hk_stock_code',
+    'is_crypto_symbol',
     'get_us_index_yf_symbol',
     'US_INDEX_MAPPING',
 ]

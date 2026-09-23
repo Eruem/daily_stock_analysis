@@ -48,6 +48,8 @@ MARKET_TIMEZONE = {
     "jp": "Asia/Tokyo",
     "kr": "Asia/Seoul",
     "tw": "Asia/Taipei",
+    # 加密货币 24/7 交易，无交易所日历；用 UTC 表示“市场本地时间”。
+    "crypto": "UTC",
 }
 
 # P0 market phase baseline (Issue #1386). This is an intentionally small
@@ -127,14 +129,17 @@ def get_market_for_stock(code: str) -> Optional[str]:
     Infer market region for a stock code.
 
     Returns:
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | None (None = unrecognized, fail-open: treat as open)
+        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'crypto' | None (None = unrecognized, fail-open: treat as open)
     """
     if not code or not isinstance(code, str):
         return None
     code = (code or "").strip().upper()
 
-    from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code
+    from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code, is_crypto_symbol
 
+    # Cryptocurrency pairs (Binance spot style: BTCUSDT / ETHBTC) — 24/7 market.
+    if is_crypto_symbol(code):
+        return "crypto"
     if is_us_stock_code(code) or is_us_index_code(code):
         return "us"
     if is_hk_stock_code(code):
@@ -161,6 +166,8 @@ def is_market_open(market: str, check_date: date) -> bool:
     Returns:
         True if trading day (or fail-open), False otherwise
     """
+    if market == "crypto":
+        return True  # 加密货币 24/7 连续交易，永不休市。
     if not _XCALS_AVAILABLE:
         return True
     ex = MARKET_EXCHANGE.get(market)
@@ -214,6 +221,10 @@ def get_effective_trading_date(
     """
     market_now = get_market_now(market, current_time=current_time)
     fallback_date = market_now.date()
+
+    if market == "crypto":
+        # 24/7 交易：最新可复用日线日期即当前 UTC 日期。
+        return fallback_date
 
     if not _XCALS_AVAILABLE:
         return fallback_date
@@ -352,6 +363,9 @@ def infer_market_phase(
     ``closing_auction`` uses a small per-market near-close heuristic window and
     does not model full exchange auction microstructure.
     """
+    if market == "crypto":
+        # 加密货币 24/7 连续交易，无集合竞价/休市概念，统一视为连续交易时段。
+        return MarketPhase.INTRADAY
     if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
         return MarketPhase.UNKNOWN
     if not _XCALS_AVAILABLE:
@@ -533,7 +547,9 @@ def build_market_phase_context(
     market_now = get_market_now(market, current_time=current_time)
     warnings: List[str] = []
 
-    if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
+    if market == "crypto":
+        phase = MarketPhase.INTRADAY
+    elif market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
         phase = MarketPhase.UNKNOWN
         _add_warning_code(warnings, "unknown_market")
     else:
