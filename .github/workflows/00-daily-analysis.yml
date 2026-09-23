@@ -29,9 +29,11 @@ on:
         type: string
 
 # 并发控制：同一时间只运行一个分析任务
+# cancel-in-progress: true —— 新运行会取代同组的挂起/进行中运行，避免历史挂起运行
+# 永久占住并发组导致后续运行（含定时任务）无法创建 job。
 concurrency:
   group: stock-analysis
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   analyze:
