@@ -558,6 +558,156 @@ class TavilySearchProvider(BaseSearchProvider):
             return '未知来源'
 
 
+class FirecrawlSearchProvider(BaseSearchProvider):
+    """Firecrawl 搜索引擎（POST https://api.firecrawl.dev/v2/search）。
+
+    特点：
+    - 单次请求同时返回 ``web`` 与 ``news`` 结果，中文财经站点覆盖较好
+    - 不依赖 Google，可作为 SerpAPI / Anspire 配额耗尽时的兜底新闻源
+    - 按 credits 计费，配置 ``FIRECRAWL_API_KEYS`` 后才会启用
+
+    文档：https://docs.firecrawl.dev/features/search
+    """
+
+    _DEFAULT_ENDPOINT = "https://api.firecrawl.dev/v2/search"
+    _REQUEST_TIMEOUT = 30
+
+    def __init__(self, api_keys: List[str], endpoint: str = ""):
+        super().__init__(api_keys, "Firecrawl")
+        self._endpoint = (endpoint or "").strip() or self._DEFAULT_ENDPOINT
+
+    @staticmethod
+    def _resolve_tbs(days: int) -> str:
+        """把“最近 N 天”映射为 Firecrawl/Google 的 tbs 时间窗参数。"""
+        if days <= 1:
+            return "qdr:d"
+        if days <= 7:
+            return "qdr:w"
+        if days <= 30:
+            return "qdr:m"
+        return "qdr:y"
+
+    @staticmethod
+    def _extract_source(url: str) -> str:
+        try:
+            return urlparse(url).netloc.replace("www.", "") or "未知来源"
+        except Exception:
+            return "未知来源"
+
+    def _collect_items(self, payload: Any) -> List[Dict[str, Any]]:
+        """把 Firecrawl 的 data 结构（web/news 分组或扁平列表）统一成列表。"""
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        items: List[Dict[str, Any]] = []
+        # news 优先：带发布时间，便于下游做时效过滤
+        for section_key in ("news", "web"):
+            section = payload.get(section_key)
+            if isinstance(section, list):
+                items.extend(item for item in section if isinstance(item, dict))
+        return items
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """执行 Firecrawl 搜索"""
+        limit = max(1, min(int(max_results), 10))
+        body = {
+            "query": query,
+            "limit": limit,
+            "sources": ["web", "news"],
+            "tbs": self._resolve_tbs(days),
+        }
+
+        try:
+            response = requests.post(
+                self._endpoint,
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self._REQUEST_TIMEOUT,
+            )
+        except Exception as exc:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"请求失败: {exc}",
+            )
+
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                error_body = response.json()
+                detail = str(
+                    error_body.get("error")
+                    or error_body.get("message")
+                    or error_body
+                )
+            except Exception:
+                detail = (response.text or "")[:200]
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"HTTP {response.status_code}: {detail}",
+            )
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"响应解析失败: {exc}",
+            )
+
+        if not data.get("success", True):
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=str(data.get("error") or "Firecrawl 返回 success=false"),
+            )
+
+        results: List[SearchResult] = []
+        seen_urls: set = set()
+        for item in self._collect_items(data.get("data")):
+            url = str(item.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            snippet = str(
+                item.get("description")
+                or item.get("snippet")
+                or item.get("content")
+                or ""
+            ).strip()
+            results.append(SearchResult(
+                title=str(item.get("title") or "").strip(),
+                snippet=snippet[:1000],
+                url=url,
+                source=self._extract_source(url),
+                published_date=item.get("date") or item.get("publishedDate"),
+            ))
+            if len(results) >= limit:
+                break
+
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+
 class SerpAPISearchProvider(BaseSearchProvider):
     """
     SerpAPI 搜索引擎
@@ -2403,6 +2553,7 @@ class SearchService:
         anspire_keys: Optional[List[str]] = None,
         brave_keys: Optional[List[str]] = None,
         serpapi_keys: Optional[List[str]] = None,
+        firecrawl_keys: Optional[List[str]] = None,
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
         searxng_public_instances_enabled: bool = True,
@@ -2430,6 +2581,7 @@ class SearchService:
             "anspire_keys": list(anspire_keys or []),
             "brave_keys": list(brave_keys or []),
             "serpapi_keys": list(serpapi_keys or []),
+            "firecrawl_keys": list(firecrawl_keys or []),
             "minimax_keys": list(minimax_keys or []),
             "searxng_base_urls": list(searxng_base_urls or []),
             "searxng_public_instances_enabled": bool(searxng_public_instances_enabled),
@@ -2470,7 +2622,12 @@ class SearchService:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
 
-        # 4. SerpAPI 作为备选（每月 100 次）
+        # 4. Firecrawl（一次请求同时返回 web/news，不依赖 Google 配额）
+        if firecrawl_keys:
+            self._providers.append(FirecrawlSearchProvider(firecrawl_keys))
+            logger.info(f"已配置 Firecrawl 搜索，共 {len(firecrawl_keys)} 个 API Key")
+
+        # 5. SerpAPI 作为备选（每月 100 次）
         if serpapi_keys:
             self._providers.append(SerpAPISearchProvider(serpapi_keys))
             logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
