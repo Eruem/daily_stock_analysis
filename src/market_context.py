@@ -12,7 +12,7 @@ Fixes: https://github.com/ZhuLinsen/daily_stock_analysis/issues/644
 import re
 from typing import Optional
 
-from src.services.market_symbol_utils import get_suffix_market, is_crypto_symbol
+from src.services.market_symbol_utils import get_suffix_market, is_bstock_symbol, is_crypto_symbol
 
 
 def detect_market(stock_code: Optional[str]) -> str:
@@ -26,6 +26,9 @@ def detect_market(stock_code: Optional[str]) -> str:
 
     code = stock_code.strip().upper()
 
+    # Binance bStocks（代币化美股/ETF，如 AAPLBUSDT）—— 24/7 但仍以美股为标的
+    if is_bstock_symbol(code):
+        return "bstock"
     # Cryptocurrency pairs (Binance spot style: BTCUSDT / ETHBTC)
     if is_crypto_symbol(code):
         return "crypto"
@@ -85,6 +88,10 @@ _MARKET_ROLES = {
     "crypto": {
         "zh": "加密货币",
         "en": "Cryptocurrency",
+    },
+    "bstock": {
+        "zh": "代币化美股(bStock)",
+        "en": "Tokenized US stock (bStock)",
     },
 }
 
@@ -166,6 +173,23 @@ _MARKET_GUIDELINES = {
             "- Crypto trades 24/7 with **no daily price limits, no T+1, and no market open/close**; focus on USD liquidity, "
             "Fed policy and macro risk appetite, the US dollar index (DXY), spot BTC ETF flows, on-chain data, and regulatory news.\n"
             "- Do not apply China A-share concepts such as price limits, Northbound flows, Dragon Tiger lists, margin financing, T+1, or sector/concept rankings."
+        ),
+    },
+    "bstock": {
+        "zh": (
+            "- 本次分析对象为 **币安代币化美股（bStock）**（如 AAPLBUSDT = 苹果代币化股票，以 USDT 计价）。\n"
+            "- 它 1:1 由托管机构持有的真实美股背书，**24/7 可在币安现货交易**（加密市场情绪溢价/折价、流动性、兑换费也会影响价格）。\n"
+            "- 基本面看**美股逻辑**：季度财报（营收/利潦/EPS）、指引、分析师评级、估值（PE/PS）、"
+            "美联储利率与宏观风险偏好、行业景气与监管；同时关注与真实股价的偏离（溢价/折价）。\n"
+            "- 技术面仍可用加密市场的 24/7 K 线；不要套用 A 股专属概念（涨跌停、北向资金、龙虎榜等）。"
+        ),
+        "en": (
+            "- This analysis covers a **Binance bStock** (tokenized US stock, e.g. AAPLBUSDT = tokenized Apple, quoted in USDT).\n"
+            "- Each bStock is backed 1:1 by a real US share held at a regulated custodian and trades **24/7 on Binance Spot** "
+            "(crypto sentiment premium/discount, liquidity, and conversion fees can affect its price).\n"
+            "- Fundamentals follow **US-equity logic**: quarterly earnings (revenue/profit/EPS), guidance, analyst ratings, "
+            "valuation (PE/PS), Fed policy and macro risk appetite, sector cycle, and regulation; also watch the deviation from the real share price (premium/discount).\n"
+            "- Technicals can still use 24/7 crypto-style candles; do not apply China A-share concepts (price limits, Northbound flows, Dragon Tiger lists, etc.)."
         ),
     },
 }

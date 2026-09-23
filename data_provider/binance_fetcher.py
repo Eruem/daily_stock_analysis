@@ -20,7 +20,7 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from src.services.market_symbol_utils import crypto_display_name, is_crypto_symbol
+from src.services.market_symbol_utils import binance_display_name, is_crypto_symbol, is_bstock_symbol
 
 from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS
 from .realtime_types import RealtimeSource, UnifiedRealtimeQuote
@@ -150,7 +150,7 @@ class BinanceFetcher(BaseFetcher):
 
         return UnifiedRealtimeQuote(
             code=symbol,
-            name=crypto_display_name(symbol),
+            name=binance_display_name(symbol),
             source=RealtimeSource.BINANCE,
             market="crypto",
             currency="USDT",
@@ -169,4 +169,4 @@ class BinanceFetcher(BaseFetcher):
         symbol = (stock_code or "").strip().upper()
         if not is_crypto_symbol(symbol):
             return None
-        return crypto_display_name(symbol)
+        return binance_display_name(symbol)

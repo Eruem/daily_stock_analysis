@@ -182,3 +182,73 @@ def crypto_display_name(stock_code: str) -> str:
     base, quote = parts
     name = _CRYPTO_BASE_NAMES.get(base)
     return f"{name}/{quote}" if name else f"{base}/{quote}"
+
+
+# --- Binance bStocks (tokenized US equities / ETFs) ------------------------
+# bStocks trade on Binance Spot as ``<TICKER>B`` + quote asset, e.g.
+# ``AAPLBUSDT``. A plain "ends with B" rule is not enough because crypto bases
+# also end with B (ARB, BNB, SHIB, TRB, ...), so a curated ticker allowlist is
+# used to keep classification deterministic and false-positive free.
+
+_BSTOCK_TICKERS: frozenset[str] = frozenset({
+    "AAOI", "AAPL", "ALAB", "AMAT", "AMD", "AMZN", "ARM", "ASML", "ASTS",
+    "AVGO", "AXTI", "BABA", "BMNR", "CBR", "COHR", "COIN", "CRCL", "CRDO",
+    "CRM", "CRWD", "CRWV", "DELL", "DJT", "DRAM", "EWY", "FLNC", "GLW",
+    "GME", "GOOGL", "GPRO", "GS", "HIMS", "HOOD", "IBM", "INTC", "IREN",
+    "KORU", "LITE", "META", "MRNA", "MRVL", "MSFT", "MSTR", "MU", "NBIS",
+    "NFLX", "NOK", "NVDA", "ORCL", "PLTR", "PYPL", "QCOM", "QQQ", "RDDT",
+    "RKLB", "SKHY", "SMCI", "SMH", "SNDK", "SOXL", "SOXS", "SPCX", "SPY",
+    "SQQQ", "STX", "TQQQ", "TSM", "TSLA", "USAR", "WDC",
+})
+
+_BSTOCK_NAMES: dict[str, str] = {
+    "AAPL": "苹果", "NVDA": "英伟达", "TSLA": "特斯拉", "MSFT": "微软",
+    "AMZN": "亚马逊", "GOOGL": "谷歌", "META": "Meta", "AMD": "AMD",
+    "INTC": "英特尔", "MU": "美光", "TSM": "台积电", "NFLX": "奈飞",
+    "PLTR": "Palantir", "COIN": "Coinbase", "MSTR": "Strategy(MicroStrategy)",
+    "HOOD": "Robinhood", "ORCL": "甲骨文", "IBM": "IBM", "PYPL": "PayPal",
+    "QCOM": "高通", "SMCI": "超微电脑", "DELL": "戴尔", "AVGO": "博通",
+    "ASML": "阿斯麦", "ARM": "Arm", "BABA": "阿里巴巴", "GS": "高盛",
+    "GME": "游戏驿站", "CRCL": "Circle", "RDDT": "Reddit", "RKLB": "Rocket Lab",
+    "SPY": "标普500ETF", "QQQ": "纳斯达克100ETF", "TQQQ": "纳指3倍做多ETF",
+    "SQQQ": "纳指3倍做空ETF", "SOXL": "半导体3倍做多ETF", "SOXS": "半导体3倍做空ETF",
+    "SMH": "半导体ETF", "GLW": "康宁", "MRNA": "Moderna", "ASTS": "AST SpaceMobile",
+    "CRWV": "CoreWeave",
+}
+
+
+def split_bstock_symbol(stock_code: str) -> Optional[tuple[str, str]]:
+    """Return ``(underlying_ticker, quote)`` for a Binance bStock, else ``None``."""
+
+    parts = split_crypto_symbol(stock_code)
+    if parts is None:
+        return None
+    base, quote = parts
+    if base.endswith("B") and base[:-1] in _BSTOCK_TICKERS:
+        return base[:-1], quote
+    return None
+
+
+def is_bstock_symbol(stock_code: str) -> bool:
+    """Return whether a code is a Binance bStock (tokenized stock/ETF)."""
+
+    return split_bstock_symbol(stock_code) is not None
+
+
+def bstock_display_name(stock_code: str) -> str:
+    """Return a display name for a bStock, e.g. ``苹果(AAPL)代币化股票``."""
+
+    parts = split_bstock_symbol(stock_code)
+    if parts is None:
+        return (stock_code or "").strip().upper()
+    ticker, _quote = parts
+    name = _BSTOCK_NAMES.get(ticker)
+    return f"{name}({ticker})代币化股票" if name else f"{ticker}代币化股票"
+
+
+def binance_display_name(stock_code: str) -> str:
+    """Unified display name for Binance symbols (bStocks or crypto pairs)."""
+
+    if is_bstock_symbol(stock_code):
+        return bstock_display_name(stock_code)
+    return crypto_display_name(stock_code)
