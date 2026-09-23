@@ -187,34 +187,71 @@ class BinanceFetcher(BaseFetcher):
     # ------------------------------------------------------------------
     # 资金面（现货净主动买入 + 合约资金费率/持仓量/多空比）
     # ------------------------------------------------------------------
+    def _collect_futures_metrics(self, symbol: str) -> tuple:
+        """采集合约公开指标（best-effort）。
+
+        Returns:
+            (metrics, errors)
+            - metrics: 成功获取的字段
+            - errors: 不可用原因，向上游汇报，避免“只有 None 没有理由”
+        """
+        metrics: dict = {}
+        errors: list = []
+
+        def _attempt(label: str, path: str, params: dict, extract) -> None:
+            try:
+                data = self._get_fapi_json(path, params)
+            except Exception as e:  # noqa: BLE001 - optional metric
+                errors.append(f"futures_{label}: {e}")
+                logger.info("[BinanceFetcher] %s %s 不可用: %s", symbol, label, e)
+                return
+            try:
+                value = extract(data)
+            except (TypeError, ValueError, IndexError, KeyError) as e:
+                errors.append(f"futures_{label}: parse {e}")
+                return
+            if value is not None:
+                metrics[label] = value
+
+        _attempt(
+            "funding_rate",
+            "/fapi/v1/premiumIndex",
+            {"symbol": symbol},
+            lambda d: (
+                float(d["lastFundingRate"])
+                if isinstance(d, dict) and d.get("lastFundingRate") is not None
+                else None
+            ),
+        )
+        _attempt(
+            "open_interest",
+            "/fapi/v1/openInterest",
+            {"symbol": symbol},
+            lambda d: (
+                float(d["openInterest"])
+                if isinstance(d, dict) and d.get("openInterest") is not None
+                else None
+            ),
+        )
+        _attempt(
+            "long_short_ratio",
+            "/futures/data/globalLongShortAccountRatio",
+            {"symbol": symbol, "period": "1d", "limit": 1},
+            lambda d: (
+                float(d[0]["longShortRatio"])
+                if isinstance(d, list) and d and d[0].get("longShortRatio") is not None
+                else None
+            ),
+        )
+        return metrics, errors
+
     def get_futures_metrics(self, stock_code: str) -> dict:
         """合约公开指标（best-effort；不可用时返回空字段，不报错）。"""
         symbol = (stock_code or "").strip().upper()
         if not is_crypto_symbol(symbol):
             return {}
-        out: dict = {}
-        try:
-            data = self._get_fapi_json("/fapi/v1/premiumIndex", {"symbol": symbol})
-            if isinstance(data, dict) and data.get("lastFundingRate") is not None:
-                out["funding_rate"] = float(data["lastFundingRate"])
-        except Exception as e:  # noqa: BLE001 - optional metric
-            logger.debug("[BinanceFetcher] %s fundingRate 不可用: %s", symbol, e)
-        try:
-            data = self._get_fapi_json("/fapi/v1/openInterest", {"symbol": symbol})
-            if isinstance(data, dict) and data.get("openInterest") is not None:
-                out["open_interest"] = float(data["openInterest"])
-        except Exception as e:  # noqa: BLE001 - optional metric
-            logger.debug("[BinanceFetcher] %s openInterest 不可用: %s", symbol, e)
-        try:
-            data = self._get_fapi_json(
-                "/futures/data/globalLongShortAccountRatio",
-                {"symbol": symbol, "period": "1d", "limit": 1},
-            )
-            if isinstance(data, list) and data and data[0].get("longShortRatio") is not None:
-                out["long_short_ratio"] = float(data[0]["longShortRatio"])
-        except Exception as e:  # noqa: BLE001 - optional metric
-            logger.debug("[BinanceFetcher] %s longShortRatio 不可用: %s", symbol, e)
-        return out
+        metrics, _errors = self._collect_futures_metrics(symbol)
+        return metrics
 
     def get_capital_flow(self, stock_code: str) -> Optional[dict]:
         """现货净主动买入资金流 + 合约资金面。
@@ -263,7 +300,8 @@ class BinanceFetcher(BaseFetcher):
         except Exception as e:  # noqa: BLE001 - surfaced via errors for fail-open
             result["errors"].append(f"spot_taker: {e}")
 
-        futures = self.get_futures_metrics(symbol)
+        futures, futures_errors = self._collect_futures_metrics(symbol)
+        result["errors"].extend(futures_errors)
         if futures:
             result["futures"] = futures
             result["source_chain"].append(
