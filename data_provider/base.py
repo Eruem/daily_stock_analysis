@@ -2948,6 +2948,25 @@ class DataFetcherManager:
         coverage = dict(coverage) if isinstance(coverage, dict) else {}
         coverage["capital_flow"] = capital_flow.get("status")
         context["coverage"] = coverage
+
+        # 可观测性：把关键字段打成一条 INFO，便于在 CI 日志直接验证
+        # 加密货币路径是否真的拿到了底层基本面 / 资金面 / 合约数据。
+        flow_data = capital_flow.get("data") if isinstance(capital_flow.get("data"), dict) else {}
+        stock_flow = flow_data.get("stock_flow") if isinstance(flow_data.get("stock_flow"), dict) else {}
+        futures_data = flow_data.get("futures") if isinstance(flow_data.get("futures"), dict) else {}
+        logger.info(
+            "[crypto] %s 基本面聚合完成: 类型=%s, 底层=%s, 估值块=%s, 资金面=%s, "
+            "主力净流入(USDT)=%s, 资金费率/持仓量/多空比=%s/%s/%s",
+            stock_code,
+            "bstock" if bstock is not None else "crypto",
+            bstock[0] if bstock is not None else "-",
+            "有" if context.get("valuation") else "无",
+            capital_flow.get("status"),
+            stock_flow.get("main_net_inflow"),
+            futures_data.get("funding_rate"),
+            futures_data.get("open_interest"),
+            futures_data.get("long_short_ratio"),
+        )
         return context
 
     def _build_offshore_fundamental_context(
