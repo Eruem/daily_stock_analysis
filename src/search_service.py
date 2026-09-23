@@ -655,6 +655,22 @@ class SerpAPISearchProvider(BaseSearchProvider):
             
             # 记录原始响应到日志
             logger.debug(f"[SerpAPI] 原始响应 keys: {response.keys()}")
+
+            # SerpAPI 通过 error 字段返回配额耗尽、密钥无效等问题（HTTP 仍是 200）。
+            # 若不在此拦截，调用方只会看到“成功但 0 条结果”，既掩盖真实错误，
+            # 也会让搜索管理器误判该数据源可用、从而不做故障转移。
+            api_error = response.get("error")
+            if api_error:
+                logger.warning(
+                    f"[SerpAPI] 返回错误（key {api_key[:8]}...）: {api_error}"
+                )
+                return SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self.name,
+                    success=False,
+                    error_message=str(api_error),
+                )
             
             # 解析结果
             results = []
