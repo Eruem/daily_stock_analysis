@@ -296,6 +296,13 @@ class BinanceFetcher(BaseFetcher):
         errors: list = []
         used_sources: list = []
 
+        # bStock（代币化美股）只有现货，没有币安永续合约：
+        # 实测 /fapi/v1/exchangeInfo 的 775 个 TRADING 永续中不存在 bStock 交易对，
+        # premiumIndex/openInterest 一律返回 -1121 Invalid symbol。
+        # 因此直接跳过，避免每个 bStock 白跑 3 次必然失败的请求。
+        if is_bstock_symbol(symbol):
+            return {}, []
+
         def _binance_metric(label: str, path: str, params: dict, extract) -> Optional[float]:
             try:
                 data = self._get_fapi_json(path, params)
