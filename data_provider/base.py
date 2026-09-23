@@ -2956,7 +2956,7 @@ class DataFetcherManager:
         futures_data = flow_data.get("futures") if isinstance(flow_data.get("futures"), dict) else {}
         logger.info(
             "[crypto] %s 基本面聚合完成: 类型=%s, 底层=%s, 估值块=%s, 资金面=%s, "
-            "主力净流入(USDT)=%s, 资金费率/持仓量/多空比=%s/%s/%s",
+            "主力净流入(USDT)=%s, 资金费率/持仓量/多空比=%s/%s/%s (来源=%s)",
             stock_code,
             "bstock" if bstock is not None else "crypto",
             bstock[0] if bstock is not None else "-",
@@ -2966,6 +2966,7 @@ class DataFetcherManager:
             futures_data.get("funding_rate"),
             futures_data.get("open_interest"),
             futures_data.get("long_short_ratio"),
+            futures_data.get("source") or "-",
         )
         return context
 

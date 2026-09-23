@@ -29,11 +29,25 @@ from .realtime_types import RealtimeSource, UnifiedRealtimeQuote
 logger = logging.getLogger(__name__)
 
 _BINANCE_DEFAULT_BASE_URL = "https://data-api.binance.vision"
-# 合约公开数据（资金费率/持仓量/多空比）：与现货不同域，且在部分地域可能被限制，
-# 因此全部调用都做 best-effort 降级处理。
+# 合约公开数据（资金费率/持仓量/多空比）：与现货不同域。
+# ``fapi.binance.com`` 对美国 IP 常返回 451（Unavailable For Legal Reasons），
+# 因此按顺序尝试同路径镜像域名；全部失败再退到 CoinGecko / Bybit。
 _BINANCE_FAPI_BASE_URL = "https://fapi.binance.com"
+_BINANCE_FAPI_MIRROR_BASE_URL = "https://www.binance.com"
+_COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
+_BYBIT_ACCOUNT_RATIO_URL = "https://api.bybit.com/v5/market/account-ratio"
 _KLINE_LIMIT = 1000
 _DAY_MS = 86_400_000
+
+
+def _safe_float(value) -> Optional[float]:
+    """容错转 float，失败返回 None。"""
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class BinanceFetcher(BaseFetcher):
@@ -50,9 +64,13 @@ class BinanceFetcher(BaseFetcher):
             .strip()
             .rstrip("/")
         )
-        self._fapi_url = (
-            (os.getenv("BINANCE_FAPI_BASE_URL") or _BINANCE_FAPI_BASE_URL).strip().rstrip("/")
+        env_fapi = (os.getenv("BINANCE_FAPI_BASE_URL") or "").strip().rstrip("/")
+        self._fapi_urls = (
+            (env_fapi,)
+            if env_fapi
+            else (_BINANCE_FAPI_BASE_URL, _BINANCE_FAPI_MIRROR_BASE_URL)
         )
+        self._coingecko_cache: Optional[list] = None
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "daily_stock_analysis/1.0"})
 
@@ -70,10 +88,21 @@ class BinanceFetcher(BaseFetcher):
         return resp.json()
 
     def _get_fapi_json(self, path: str, params: dict, timeout: int = 15):
-        """合约公开数据（best-effort，失败由调用方降级）。"""
-        resp = self._session.get(f"{self._fapi_url}{path}", params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        """合约公开数据（best-effort）。
+
+        按顺序尝试若个域名：``fapi.binance.com`` 对美国 IP 常返回 451，
+        而 ``www.binance.com`` 提供同路径同结构的数据。全部失败才抛出，
+        异常信息带上每个域名的失败原因，便于定位地域限制。
+        """
+        errors = []
+        for base in self._fapi_urls:
+            try:
+                resp = self._session.get(f"{base}{path}", params=params, timeout=timeout)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:  # noqa: BLE001 - try next mirror
+                errors.append(f"{base}: {e}")
+        raise RuntimeError("; ".join(errors) if errors else "no fapi base url configured")
 
     # ------------------------------------------------------------------
     # BaseFetcher 接口
@@ -187,63 +216,168 @@ class BinanceFetcher(BaseFetcher):
     # ------------------------------------------------------------------
     # 资金面（现货净主动买入 + 合约资金费率/持仓量/多空比）
     # ------------------------------------------------------------------
+    def _coingecko_derivatives(self) -> list:
+        """懒加载并缓存 CoinGecko 衍生品快照（一次请求覆盖全部 symbol）。"""
+        if self._coingecko_cache is not None:
+            return self._coingecko_cache
+        try:
+            resp = self._session.get(
+                _COINGECKO_DERIVATIVES_URL,
+                params={"include_tickers": "unchecked"},
+                timeout=25,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._coingecko_cache = data if isinstance(data, list) else []
+        except Exception as e:  # noqa: BLE001 - optional metric
+            logger.info("[BinanceFetcher] CoinGecko derivatives 不可用: %s", e)
+            self._coingecko_cache = []
+        return self._coingecko_cache
+
+    def _coingecko_futures_metrics(self, symbol: str) -> dict:
+        """从 CoinGecko 取币安永续的 funding / OI（单位已归一化到币安口径）。
+
+        - CoinGecko ``funding_rate`` 是百分比，/100 后与币安小数口径一致
+        - CoinGecko ``open_interest`` 是美元名义值，按 ``index`` 价折回基础币数量，
+          与币安 ``/fapi/v1/openInterest``（币本位数）可比
+
+        注意：CoinGecko 只覆盖加密永续合约，代币化美股（bStock）无数据。
+        """
+        for item in self._coingecko_derivatives():
+            if not isinstance(item, dict) or item.get("symbol") != symbol:
+                continue
+            if str(item.get("market") or "").strip().lower() != "binance (futures)":
+                continue
+            out: dict = {}
+            funding = _safe_float(item.get("funding_rate"))
+            if funding is not None:
+                out["funding_rate"] = funding / 100.0
+            oi_usd = _safe_float(item.get("open_interest"))
+            index_price = _safe_float(item.get("index"))
+            if oi_usd is not None and index_price:
+                out["open_interest"] = oi_usd / index_price
+            return out
+        return {}
+
+    def _bybit_long_short_ratio(self, symbol: str) -> Optional[float]:
+        """Bybit 合约账户多空比（buyRatio / sellRatio）。
+
+        币安多空比接口不可用时的市场情绪代理指标——口径为“另一家交易所”，
+        因此仅在币安不可用时使用，并通过 ``futures.source`` 标注来源。
+        """
+        try:
+            resp = self._session.get(
+                _BYBIT_ACCOUNT_RATIO_URL,
+                params={"category": "linear", "symbol": symbol, "period": "1d", "limit": 1},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            items = ((resp.json() or {}).get("result") or {}).get("list") or []
+        except Exception as e:  # noqa: BLE001 - optional metric
+            logger.info("[BinanceFetcher] Bybit account-ratio 不可用: %s", e)
+            return None
+        if not items:
+            return None
+        buy = _safe_float(items[0].get("buyRatio"))
+        sell = _safe_float(items[0].get("sellRatio"))
+        if buy is None or not sell:
+            return None
+        return buy / sell
+
     def _collect_futures_metrics(self, symbol: str) -> tuple:
-        """采集合约公开指标（best-effort）。
+        """采集合约公开指标（best-effort，多源回退）。
 
         Returns:
             (metrics, errors)
-            - metrics: 成功获取的字段
+            - metrics: 成功获取的字段；含 ``source`` 说明实际生效的上游
             - errors: 不可用原因，向上游汇报，避免“只有 None 没有理由”
         """
         metrics: dict = {}
         errors: list = []
+        used_sources: list = []
 
-        def _attempt(label: str, path: str, params: dict, extract) -> None:
+        def _binance_metric(label: str, path: str, params: dict, extract) -> Optional[float]:
             try:
                 data = self._get_fapi_json(path, params)
-            except Exception as e:  # noqa: BLE001 - optional metric
+            except Exception as e:  # noqa: BLE001 - fall back to non-binance source
                 errors.append(f"futures_{label}: {e}")
-                logger.info("[BinanceFetcher] %s %s 不可用: %s", symbol, label, e)
-                return
+                return None
             try:
-                value = extract(data)
+                return extract(data)
             except (TypeError, ValueError, IndexError, KeyError) as e:
                 errors.append(f"futures_{label}: parse {e}")
-                return
-            if value is not None:
-                metrics[label] = value
+                return None
 
-        _attempt(
+        funding = _binance_metric(
             "funding_rate",
             "/fapi/v1/premiumIndex",
             {"symbol": symbol},
             lambda d: (
-                float(d["lastFundingRate"])
-                if isinstance(d, dict) and d.get("lastFundingRate") is not None
-                else None
+                _safe_float(d.get("lastFundingRate")) if isinstance(d, dict) else None
             ),
         )
-        _attempt(
+        open_interest = _binance_metric(
             "open_interest",
             "/fapi/v1/openInterest",
             {"symbol": symbol},
-            lambda d: (
-                float(d["openInterest"])
-                if isinstance(d, dict) and d.get("openInterest") is not None
-                else None
-            ),
+            lambda d: _safe_float(d.get("openInterest")) if isinstance(d, dict) else None,
         )
-        _attempt(
+        long_short_ratio = _binance_metric(
             "long_short_ratio",
             "/futures/data/globalLongShortAccountRatio",
             {"symbol": symbol, "period": "1d", "limit": 1},
-            lambda d: (
-                float(d[0]["longShortRatio"])
-                if isinstance(d, list) and d and d[0].get("longShortRatio") is not None
-                else None
-            ),
+            lambda d: _safe_float(d[0].get("longShortRatio")) if isinstance(d, list) and d else None,
         )
-        return metrics, errors
+
+        if funding is not None:
+            metrics["funding_rate"] = funding
+            used_sources.append("币安合约")
+        if open_interest is not None:
+            metrics["open_interest"] = open_interest
+            used_sources.append("币安合约")
+        if long_short_ratio is not None:
+            metrics["long_short_ratio"] = long_short_ratio
+            used_sources.append("币安合约")
+
+        # 二级：CoinGecko 聚合（币安域名被地域封锁时的兜底，仅 crypto）
+        if funding is None or open_interest is None:
+            cg = self._coingecko_futures_metrics(symbol)
+            if funding is None and cg.get("funding_rate") is not None:
+                metrics["funding_rate"] = cg["funding_rate"]
+                used_sources.append("CoinGecko")
+            if open_interest is None and cg.get("open_interest") is not None:
+                metrics["open_interest"] = cg["open_interest"]
+                used_sources.append("CoinGecko")
+            if not cg:
+                errors.append(f"futures_coingecko: {symbol} 无匹配的永续合约数据")
+
+        # 二级：多空比用 Bybit 账户多空比代理
+        if long_short_ratio is None:
+            bybit_ratio = self._bybit_long_short_ratio(symbol)
+            if bybit_ratio is not None:
+                metrics["long_short_ratio"] = bybit_ratio
+                used_sources.append("Bybit")
+            else:
+                errors.append("futures_long_short_ratio: 币安与 Bybit 均不可用")
+
+        if used_sources:
+            metrics["source"] = "/".join(dict.fromkeys(used_sources))
+
+        for reason in errors:
+            logger.info("[BinanceFetcher] %s 合约指标不可用: %s", symbol, reason)
+
+        # 只把“最终仍然缺失”的指标作为错误上报：已成功回退的（例如币安 451
+        # 但 CoinGecko 已补齐）不应污染上层 errors 与提示词。
+        unreported: list = []
+        for label, value in (
+            ("funding_rate", metrics.get("funding_rate")),
+            ("open_interest", metrics.get("open_interest")),
+            ("long_short_ratio", metrics.get("long_short_ratio")),
+        ):
+            if value is None:
+                unreported.append(f"futures_{label}: 所有可用数据源均未返回该指标")
+
+        return metrics, unreported
 
     def get_futures_metrics(self, stock_code: str) -> dict:
         """合约公开指标（best-effort；不可用时返回空字段，不报错）。"""
