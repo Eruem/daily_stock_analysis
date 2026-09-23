@@ -2856,6 +2856,100 @@ class DataFetcherManager:
             **blocks,
         }
 
+    # ------------------------------------------------------------------
+    # 加密货币（币安现货 / bStocks）基本面 + 资金面
+    # ------------------------------------------------------------------
+    def _build_crypto_capital_flow_block(self, stock_code: str) -> Dict[str, Any]:
+        """加密货币资金面块：币安现货净主动买入 + 合约资金费率/持仓量/多空比。"""
+        fetcher = self._get_fetcher_by_name("BinanceFetcher")
+        if fetcher is None:
+            return self._build_fundamental_block(
+                "not_supported",
+                {},
+                [{"provider": "binance", "result": "not_supported", "duration_ms": 0}],
+                ["binance fetcher unavailable"],
+            )
+        started = time.time()
+        try:
+            payload = self._call_fetcher_method(fetcher, "get_capital_flow", stock_code)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "binance", "result": "failed", "duration_ms": int((time.time() - started) * 1000)}],
+                [str(e)],
+            )
+        if not isinstance(payload, dict):
+            return self._build_fundamental_block(
+                "failed",
+                {},
+                [{"provider": "binance", "result": "failed", "duration_ms": int((time.time() - started) * 1000)}],
+                ["empty capital flow payload"],
+            )
+        status = str(payload.get("status") or "partial")
+        cost_ms = int((time.time() - started) * 1000)
+        source_chain = list(payload.get("source_chain") or [])
+        if not source_chain:
+            source_chain = [{"provider": "binance", "result": status, "duration_ms": cost_ms}]
+        return self._build_fundamental_block(
+            status,
+            {
+                "stock_flow": payload.get("stock_flow", {}),
+                "futures": payload.get("futures", {}),
+            },
+            source_chain,
+            list(payload.get("errors") or []),
+        )
+
+    def _build_crypto_fundamental_context(
+        self,
+        stock_code: str,
+        budget_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """加密货币基本面聚合。
+
+        - bStocks（代币化美股）: 用底层真实股票代码走 yfinance 离线基本面
+          （估值/增长/业绩/机构），再叠加币安资金面。
+        - 纯加密货币: 无传统财报口径，仅提供币安资金面。
+        """
+        stock_code = normalize_stock_code(stock_code)
+        from src.services.market_symbol_utils import split_bstock_symbol
+
+        bstock = split_bstock_symbol(stock_code)
+        base_ctx: Optional[Dict[str, Any]] = None
+        if bstock is not None:
+            underlying, _quote = bstock
+            try:
+                base_ctx = self._build_offshore_fundamental_context(
+                    underlying,
+                    market="us",
+                    budget_seconds=budget_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail-open to crypto-only context
+                logger.warning("[crypto] %s 底层美股基本面获取失败: %s", stock_code, exc)
+                base_ctx = None
+
+        if base_ctx is None:
+            base_ctx = self._build_market_not_supported(
+                market="crypto",
+                reason="crypto has no traditional fundamentals",
+            )
+
+        context = dict(base_ctx)
+        context["market"] = "crypto"
+        if bstock is not None:
+            context["asset_type"] = "bstock"
+            context["underlying_symbol"] = bstock[0]
+
+        capital_flow = self._build_crypto_capital_flow_block(stock_code)
+        context["capital_flow"] = capital_flow
+
+        coverage = context.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage["capital_flow"] = capital_flow.get("status")
+        context["coverage"] = coverage
+        return context
+
     def _build_offshore_fundamental_context(
         self,
         stock_code: str,
@@ -3167,10 +3261,9 @@ class DataFetcherManager:
         market = _market_tag(stock_code)
         is_etf = _is_etf_code(stock_code)
         if market == "crypto":
-            # 加密货币没有 A 股式基本面（估值/财报/龙虎榜/资金流），直接标记为不支持。
-            return self._build_market_not_supported(
-                market="crypto",
-                reason="crypto has no fundamental pipeline",
+            return self._build_crypto_fundamental_context(
+                stock_code,
+                budget_seconds=budget_seconds,
             )
         if market in {"us", "hk", "jp", "kr", "tw"}:
             return self._build_offshore_fundamental_context(
@@ -3462,6 +3555,9 @@ class DataFetcherManager:
 
         config = get_config()
         stock_code = normalize_stock_code(stock_code)
+        if _market_tag(stock_code) == "crypto":
+            # 加密货币：币安现货净主动买入 + 合约资金费率/持仓量/多空比
+            return self._build_crypto_capital_flow_block(stock_code)
         timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
         if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
             return self._build_fundamental_block(

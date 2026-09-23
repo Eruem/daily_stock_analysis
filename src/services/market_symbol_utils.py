@@ -252,3 +252,28 @@ def binance_display_name(stock_code: str) -> str:
     if is_bstock_symbol(stock_code):
         return bstock_display_name(stock_code)
     return crypto_display_name(stock_code)
+
+
+def crypto_query_terms(stock_code: str) -> str:
+    """Return search-engine friendly terms for a Binance symbol.
+
+    Crypto:    ``BTCUSDT``   -> ``比特币 BTC``
+    bStock:    ``AAPLBUSDT`` -> ``苹果 AAPL``
+    """
+
+    bstock = split_bstock_symbol(stock_code)
+    if bstock is not None:
+        ticker, _quote = bstock
+        name = _BSTOCK_NAMES.get(ticker)
+        return f"{name} {ticker}" if name else ticker
+
+    parts = split_crypto_symbol(stock_code)
+    if parts is not None:
+        base, _quote = parts
+        name = _CRYPTO_BASE_NAMES.get(base)
+        if name:
+            cn = name.split("(")[0]
+            return f"{cn} {base}"
+        return base
+
+    return (stock_code or "").strip().upper()

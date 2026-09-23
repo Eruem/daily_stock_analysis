@@ -4375,7 +4375,108 @@ class SearchService:
         is_foreign = self._is_foreign_stock(stock_code)
         is_index_etf = self.is_index_or_etf(stock_code, stock_name)
 
-        if is_foreign:
+        from src.services.market_symbol_utils import (
+            crypto_query_terms,
+            is_bstock_symbol,
+            is_crypto_symbol,
+        )
+        is_crypto = is_crypto_symbol(stock_code)
+
+        if is_crypto:
+            terms = crypto_query_terms(stock_code)
+            if is_bstock_symbol(stock_code):
+                # 代币化美股（bStock）：按美股逻辑检索（财报/评级/监管）
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{terms} 最新消息 股价 新闻",
+                        'desc': '最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'market_analysis',
+                        'query': f"{terms} 分析师 评级 目标价 研报",
+                        'desc': '机构分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'risk_check',
+                        'query': f"{terms} 风险 诉讼 监管 利空",
+                        'desc': '风险排查',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'announcements',
+                        'query': f"{terms} 财报 业绩 公告 earnings",
+                        'desc': '公司公告',
+                        'tavily_topic': 'news',
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'earnings',
+                        'query': f"{terms} earnings revenue profit guidance",
+                        'desc': '业绩预期',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'industry',
+                        'query': f"{terms} 行业 竞争 前景 市场份额",
+                        'desc': '行业分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
+            else:
+                # 加密货币：使用加密语义查询词，避免套用 A 股“财报/减持/龙虎榜”等模板
+                search_dimensions = [
+                    {
+                        'name': 'latest_news',
+                        'query': f"{terms} 最新消息 新闻 行情",
+                        'desc': '最新消息',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'market_analysis',
+                        'query': f"{terms} 行情分析 走势 预测",
+                        'desc': '机构分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'risk_check',
+                        'query': f"{terms} 监管 风险 暴跌 利空",
+                        'desc': '风险排查',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'announcements',
+                        'query': f"{terms} 交易所 公告 升级 上架",
+                        'desc': '交易所公告',
+                        'tavily_topic': 'news',
+                        'strict_freshness': True,
+                    },
+                    {
+                        'name': 'earnings',
+                        'query': f"{terms} 市值 资金流 链上数据",
+                        'desc': '基本面/资金面',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                    {
+                        'name': 'industry',
+                        'query': f"{terms} 赛道 生态 竞争 前景",
+                        'desc': '行业分析',
+                        'tavily_topic': None,
+                        'strict_freshness': False,
+                    },
+                ]
+        elif is_foreign:
             # Issue #2026: Foreign-ticker English alias resolution from the
             # single source of truth (STOCK_ENGLISH_NAME_MAP in
             # src/data/stock_mapping.py). When STOCK_NAME_MAP maps the ticker

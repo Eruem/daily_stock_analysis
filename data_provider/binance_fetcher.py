@@ -14,6 +14,7 @@ BinanceFetcher — 币安现货行情数据源（加密货币，24/7）
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -28,6 +29,9 @@ from .realtime_types import RealtimeSource, UnifiedRealtimeQuote
 logger = logging.getLogger(__name__)
 
 _BINANCE_DEFAULT_BASE_URL = "https://data-api.binance.vision"
+# 合约公开数据（资金费率/持仓量/多空比）：与现货不同域，且在部分地域可能被限制，
+# 因此全部调用都做 best-effort 降级处理。
+_BINANCE_FAPI_BASE_URL = "https://fapi.binance.com"
 _KLINE_LIMIT = 1000
 _DAY_MS = 86_400_000
 
@@ -46,6 +50,9 @@ class BinanceFetcher(BaseFetcher):
             .strip()
             .rstrip("/")
         )
+        self._fapi_url = (
+            (os.getenv("BINANCE_FAPI_BASE_URL") or _BINANCE_FAPI_BASE_URL).strip().rstrip("/")
+        )
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "daily_stock_analysis/1.0"})
 
@@ -59,6 +66,12 @@ class BinanceFetcher(BaseFetcher):
 
     def _get_json(self, path: str, params: dict, timeout: int = 20):
         resp = self._session.get(f"{self._base_url}{path}", params=params, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _get_fapi_json(self, path: str, params: dict, timeout: int = 15):
+        """合约公开数据（best-effort，失败由调用方降级）。"""
+        resp = self._session.get(f"{self._fapi_url}{path}", params=params, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -170,3 +183,91 @@ class BinanceFetcher(BaseFetcher):
         if not is_crypto_symbol(symbol):
             return None
         return binance_display_name(symbol)
+
+    # ------------------------------------------------------------------
+    # 资金面（现货净主动买入 + 合约资金费率/持仓量/多空比）
+    # ------------------------------------------------------------------
+    def get_futures_metrics(self, stock_code: str) -> dict:
+        """合约公开指标（best-effort；不可用时返回空字段，不报错）。"""
+        symbol = (stock_code or "").strip().upper()
+        if not is_crypto_symbol(symbol):
+            return {}
+        out: dict = {}
+        try:
+            data = self._get_fapi_json("/fapi/v1/premiumIndex", {"symbol": symbol})
+            if isinstance(data, dict) and data.get("lastFundingRate") is not None:
+                out["funding_rate"] = float(data["lastFundingRate"])
+        except Exception as e:  # noqa: BLE001 - optional metric
+            logger.debug("[BinanceFetcher] %s fundingRate 不可用: %s", symbol, e)
+        try:
+            data = self._get_fapi_json("/fapi/v1/openInterest", {"symbol": symbol})
+            if isinstance(data, dict) and data.get("openInterest") is not None:
+                out["open_interest"] = float(data["openInterest"])
+        except Exception as e:  # noqa: BLE001 - optional metric
+            logger.debug("[BinanceFetcher] %s openInterest 不可用: %s", symbol, e)
+        try:
+            data = self._get_fapi_json(
+                "/futures/data/globalLongShortAccountRatio",
+                {"symbol": symbol, "period": "1d", "limit": 1},
+            )
+            if isinstance(data, list) and data and data[0].get("longShortRatio") is not None:
+                out["long_short_ratio"] = float(data[0]["longShortRatio"])
+        except Exception as e:  # noqa: BLE001 - optional metric
+            logger.debug("[BinanceFetcher] %s longShortRatio 不可用: %s", symbol, e)
+        return out
+
+    def get_capital_flow(self, stock_code: str) -> Optional[dict]:
+        """现货净主动买入资金流 + 合约资金面。
+
+        净主动买入（USDT）= 2 × 主动买成交额 − 总成交额（taker buy 口径）。
+        返回结构对齐项目里的 ``capital_flow`` 块 data.stock_flow 字段。
+        """
+        symbol = (stock_code or "").strip().upper()
+        if not is_crypto_symbol(symbol):
+            return None
+
+        result: dict = {
+            "status": "partial",
+            "stock_flow": {},
+            "futures": {},
+            "source_chain": [],
+            "errors": [],
+        }
+
+        started = time.time()
+        try:
+            data = self._get_json(
+                "/api/v3/klines",
+                {"symbol": symbol, "interval": "1d", "limit": 15},
+            )
+            nets: list = []
+            if isinstance(data, list):
+                for k in data:
+                    quote_volume = float(k[7])
+                    taker_buy_quote = float(k[10])
+                    nets.append(2 * taker_buy_quote - quote_volume)
+            if nets:
+                result["stock_flow"] = {
+                    "main_net_inflow": round(nets[-1], 2),
+                    "inflow_5d": round(sum(nets[-5:]), 2),
+                    "inflow_10d": round(sum(nets[-10:]), 2),
+                }
+                result["status"] = "ok"
+                result["source_chain"].append(
+                    {
+                        "provider": "binance_spot_taker",
+                        "result": "ok",
+                        "duration_ms": int((time.time() - started) * 1000),
+                    }
+                )
+        except Exception as e:  # noqa: BLE001 - surfaced via errors for fail-open
+            result["errors"].append(f"spot_taker: {e}")
+
+        futures = self.get_futures_metrics(symbol)
+        if futures:
+            result["futures"] = futures
+            result["source_chain"].append(
+                {"provider": "binance_futures", "result": "ok", "duration_ms": 0}
+            )
+
+        return result
