@@ -71,6 +71,8 @@ class BinanceFetcher(BaseFetcher):
             else (_BINANCE_FAPI_BASE_URL, _BINANCE_FAPI_MIRROR_BASE_URL)
         )
         self._coingecko_cache: Optional[list] = None
+        # 仅在合约上线的标的（CLUSDT/龙虾USDT 等）：记住后直接走 fapi
+        self._futures_only_symbols: set = set()
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "daily_stock_analysis/1.0"})
 
@@ -104,6 +106,23 @@ class BinanceFetcher(BaseFetcher):
                 errors.append(f"{base}: {e}")
         raise RuntimeError("; ".join(errors) if errors else "no fapi base url configured")
 
+    def _get_klines(self, symbol: str, params: dict):
+        """K 线获取：现货优先，合约回退。
+
+        CLUSDT / 龙虾USDT 等标的只在币安 U 本位永续合约上线（现货币币区
+        无此交易对，返回 -1121 Invalid symbol）。失败后回退 /fapi/v1/klines
+        （字段结构与现货一致），并把 symbol 记入合约缓存避免后续重复试现货。
+        """
+        if symbol not in self._futures_only_symbols:
+            try:
+                data = self._get_json("/api/v3/klines", params)
+                if isinstance(data, list):
+                    return data
+            except Exception as e:  # noqa: BLE001 - fall through to futures
+                logger.info("[BinanceFetcher] %s 现货 K 线失败，尝试合约: %s", symbol, e)
+                self._futures_only_symbols.add(symbol)
+        return self._get_fapi_json("/fapi/v1/klines", params, timeout=20)
+
     # ------------------------------------------------------------------
     # BaseFetcher 接口
     # ------------------------------------------------------------------
@@ -120,7 +139,7 @@ class BinanceFetcher(BaseFetcher):
             "limit": _KLINE_LIMIT,
         }
         try:
-            data = self._get_json("/api/v3/klines", params)
+            data = self._get_klines(symbol, params)
         except Exception as e:  # noqa: BLE001 - surfaced as DataFetchError for failover
             raise DataFetchError(f"[BinanceFetcher] {symbol} 请求失败: {e}") from e
 
@@ -174,9 +193,14 @@ class BinanceFetcher(BaseFetcher):
 
         try:
             data = self._get_json("/api/v3/ticker/24hr", {"symbol": symbol}, timeout=15)
-        except Exception as e:  # noqa: BLE001 - realtime is best-effort
-            logger.warning(f"[BinanceFetcher] {symbol} 实时行情失败: {e}")
-            return None
+        except Exception:  # noqa: BLE001 - realtime is best-effort
+            # 合约专属标的（CLUSDT/龙虾USDT 等）现货币币区无此对，回退 fapi
+            try:
+                data = self._get_fapi_json("/fapi/v1/ticker/24hr", {"symbol": symbol}, timeout=15)
+                self._futures_only_symbols.add(symbol)
+            except Exception as e2:  # noqa: BLE001
+                logger.warning(f"[BinanceFetcher] {symbol} 实时行情失败(现货+合约): {e2}")
+                return None
 
         if not isinstance(data, dict) or "lastPrice" not in data:
             return None
@@ -414,8 +438,8 @@ class BinanceFetcher(BaseFetcher):
 
         started = time.time()
         try:
-            data = self._get_json(
-                "/api/v3/klines",
+            data = self._get_klines(
+                symbol,
                 {"symbol": symbol, "interval": "1d", "limit": 15},
             )
             nets: list = []
