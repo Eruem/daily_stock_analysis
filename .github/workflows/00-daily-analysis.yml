@@ -1,5 +1,10 @@
 name: 每日股票分析
 
+# 需要 contents: write：「提交报告到仓库」步骤要推送 reports/ 到 main，
+# 否则 GITHUB_TOKEN 只读导致 push 静默失败（本地自动拉取拿不到报告）
+permissions:
+  contents: write
+
 on:
   # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
   schedule:
