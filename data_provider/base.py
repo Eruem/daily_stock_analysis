@@ -2859,6 +2859,68 @@ class DataFetcherManager:
     # ------------------------------------------------------------------
     # 加密货币（币安现货 / bStocks）基本面 + 资金面
     # ------------------------------------------------------------------
+    def _build_crypto_market_block(self) -> Dict[str, Any]:
+        """加密市场情绪与流动性块（免费无 key 数据源）。
+
+        - Fear & Greed Index（Alternative.me）：市场恐慌/贪婪情绪
+        - DefiLlama：全链 TVL + 稳定币总市值（资金水位/场外弹药）
+        全部 fail-open：任一子源失败不阻断另一个。
+        """
+        from data_provider.free_crypto_sources import (
+            fetch_defillama_snapshot,
+            fetch_fear_greed,
+        )
+
+        started = time.time()
+        source_chain: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        payload: Dict[str, Any] = {"fear_greed": None, "defillama": None}
+
+        try:
+            fng = fetch_fear_greed(days=7)
+        except Exception as e:  # noqa: BLE001 - fail-open
+            fng = None
+            errors.append(f"fear_greed: {e}")
+        if fng is not None:
+            payload["fear_greed"] = fng
+            source_chain.append({"provider": "alternative_me", "result": "ok", "duration_ms": 0})
+        else:
+            errors.append("fear_greed: unavailable")
+
+        try:
+            llama = fetch_defillama_snapshot()
+        except Exception as e:  # noqa: BLE001 - fail-open
+            llama = None
+            errors.append(f"defillama: {e}")
+        if llama is not None:
+            payload["defillama"] = llama
+            source_chain.append({"provider": "defillama", "result": "ok", "duration_ms": 0})
+        else:
+            errors.append("defillama: unavailable")
+
+        if payload["fear_greed"] is None and payload["defillama"] is None:
+            status = "failed"
+        elif errors:
+            status = "partial"
+        else:
+            status = "ok"
+
+        return {
+            "status": status,
+            "coverage": {
+                k: ("ok" if payload[k] is not None else "failed")
+                for k in ("fear_greed", "defillama")
+            },
+            "source_chain": source_chain
+            or [{
+                "provider": "free_crypto_sources",
+                "result": status,
+                "duration_ms": int((time.time() - started) * 1000),
+            }],
+            "errors": errors,
+            "data": payload,
+        }
+
     def _build_crypto_capital_flow_block(self, stock_code: str) -> Dict[str, Any]:
         """加密货币资金面块：币安现货净主动买入 + 合约资金费率/持仓量/多空比。"""
         fetcher = self._get_fetcher_by_name("BinanceFetcher")
@@ -2944,9 +3006,16 @@ class DataFetcherManager:
         capital_flow = self._build_crypto_capital_flow_block(stock_code)
         context["capital_flow"] = capital_flow
 
+        # 市场级免费数据（FNG 情绪 + DefiLlama TVL/稳定币）：
+        # 对纯加密货币与 bStock 都有意义（反映所在市场的整体资金环境），
+        # 失败 fail-open 不影响主流程。
+        crypto_market = self._build_crypto_market_block()
+        context["crypto_market"] = crypto_market
+
         coverage = context.get("coverage")
         coverage = dict(coverage) if isinstance(coverage, dict) else {}
         coverage["capital_flow"] = capital_flow.get("status")
+        coverage["crypto_market"] = crypto_market.get("status")
         context["coverage"] = coverage
 
         # 可观测性：把关键字段打成一条 INFO，便于在 CI 日志直接验证

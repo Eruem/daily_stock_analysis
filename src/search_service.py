@@ -708,6 +708,218 @@ class FirecrawlSearchProvider(BaseSearchProvider):
         )
 
 
+class RSSSearchProvider(BaseSearchProvider):
+    """RSS/Atom 公开新闻源聚合（免费、无 API Key、无配额兜底）。
+
+    抓取一组公开 RSS/Atom feed（加密货币 + 财经），按查询词对
+    title/description 做关键词打分，返回最相关的若干条。
+
+    设计要点：
+    - 无配额、无 key：作为所有付费搜索源失效后的最终兜底；
+    - feed 结果进程内缓存 10 分钟：同一批分析的多个维度共享一次抓取；
+    - 并发拉取全部 feed（单 feed 8s 超时），首次刷新 ≤8s；
+    - published_date 透传原始 pubDate/updated，交给下游
+      ``_filter_news_response`` 统一按新闻窗口过滤。
+    """
+
+    _FEED_SOURCES = (
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("吴说区块链", "https://www.wublock123.com/feed"),
+        ("深潮TechFlow", "https://www.techflowpost.com/rss.aspx"),
+        ("Cointelegraph", "https://cointelegraph.com/rss"),
+        ("Decrypt", "https://decrypt.co/feed"),
+        ("The Block", "https://www.theblock.co/rss.xml"),
+        ("Investing.com", "https://www.investing.com/rss/news_25.rss"),
+    )
+    _FEED_TIMEOUT = 8
+    _FEED_CACHE_TTL = 600  # 10 分钟
+    # 中文查询词 -> 英文 feed 标题里可能出现的别名（提升跨语言召回）
+    _QUERY_SYNONYMS = {
+        "比特币": ("bitcoin", "btc"),
+        "以太坊": ("ethereum", "eth"),
+        "以太币": ("ethereum", "eth"),
+        "苹果": ("apple", "aapl"),
+        "英伟达": ("nvidia", "nvda"),
+        "微软": ("microsoft", "msft"),
+        "特斯拉": ("tesla", "tsla"),
+        "亚马逊": ("amazon", "amzn"),
+        "谷歌": ("alphabet", "googl"),
+        "脸书": ("meta", "facebook"),
+        "奈飞": ("netflix", "nflx"),
+    }
+
+    def __init__(self, feeds: Optional[List[Tuple[str, str]]] = None):
+        # RSS 无需真实 key；占位 key 仅为复用基类的计时/错误统计逻辑。
+        super().__init__(["__rss_public__"], "RSS")
+        self._feeds = list(feeds or self._FEED_SOURCES)
+        self._feed_cache: Dict[str, Tuple[float, List[Dict[str, str]]]] = {}
+        self._feed_cache_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # feed 抓取与解析
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _strip_html(value: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", value or "")
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _parse_feed(cls, source: str, raw: bytes) -> List[Dict[str, str]]:
+        """解析 RSS 2.0（channel/item）与 Atom（feed/entry）。"""
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            logger.debug("[RSS] %s 解析失败: %s", source, e)
+            return []
+
+        items: List[Dict[str, str]] = []
+        # 注意：ElementTree 的 iter("{*}item") 不匹配“无命名空间”节点
+        # （而 findtext("{*}title") 却可以）——必须先试无 ns 再试通配。
+        nodes = list(root.iter("item")) or list(root.iter("{*}item"))
+        if not nodes:
+            nodes = list(root.iter("entry")) or list(root.iter("{*}entry"))
+        for node in nodes:
+            title = (node.findtext("{*}title") or "").strip()
+            link = ""
+            link_el = node.find("{*}link")
+            if link_el is not None:
+                link = (link_el.get("href") or link_el.text or "").strip()
+            if not link:
+                link = (node.findtext("{*}link") or "").strip()
+            desc = cls._strip_html(
+                node.findtext("{*}description")
+                or node.findtext("{*}summary")
+                or node.findtext("{*}content")
+                or ""
+            )
+            pub = (
+                node.findtext("{*}pubDate")
+                or node.findtext("{*}published")
+                or node.findtext("{*}updated")
+                or ""
+            ).strip()
+            if not title or not link:
+                continue
+            items.append({
+                "title": title,
+                "link": link,
+                "description": desc[:500],
+                "pub": pub,
+                "source": source,
+            })
+        return items
+
+    def _fetch_all_feeds(self) -> List[Dict[str, str]]:
+        """并发拉取全部 feed，结果按 TTL 缓存。"""
+        now = time.time()
+        with self._feed_cache_lock:
+            if self._feed_cache and min(ts for ts, _ in self._feed_cache.values()) > now:
+                merged: List[Dict[str, str]] = []
+                for _, items in self._feed_cache.values():
+                    merged.extend(items)
+                return merged
+
+        def _one(entry: Tuple[str, str]) -> List[Dict[str, str]]:
+            source, url = entry
+            try:
+                resp = requests.get(
+                    url,
+                    timeout=self._FEED_TIMEOUT,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; daily_stock_analysis/1.0)"},
+                )
+                resp.raise_for_status()
+                return self._parse_feed(source, resp.content)
+            except Exception as e:  # noqa: BLE001 - 单 feed 失败不影响其它
+                logger.debug("[RSS] %s 抓取失败: %s", source, e)
+                return []
+
+        items_by_feed: List[Tuple[str, List[Dict[str, str]]]] = []
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(8, len(self._feeds))) as pool:
+            parsed = list(pool.map(_one, self._feeds))
+
+        merged = []
+        for (source, _url), items in zip(self._feeds, parsed):
+            items_by_feed.append((source, items))
+            merged.extend(items)
+
+        expires = now + self._FEED_CACHE_TTL
+        with self._feed_cache_lock:
+            self._feed_cache = {src: (expires, its) for src, its in items_by_feed}
+        return merged
+
+    # ------------------------------------------------------------------
+    # 查询匹配
+    # ------------------------------------------------------------------
+    @classmethod
+    def _query_terms(cls, query: str) -> List[str]:
+        terms = [t for t in re.split(r"[\s,，、]+", query or "") if t]
+        expanded: List[str] = []
+        for term in terms:
+            expanded.append(term)
+            expanded.extend(cls._QUERY_SYNONYMS.get(term, ()))
+        # 去重保序，统一小写用于匹配
+        seen = set()
+        out = []
+        for t in expanded:
+            key = t.lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """按查询词在 RSS 聚合池中打分检索（日期过滤交给下游窗口）。"""
+        terms = self._query_terms(query)
+        if not terms:
+            return SearchResponse(
+                query=query, results=[], provider=self.name,
+                success=True, error_message="empty query",
+            )
+
+        try:
+            pool = self._fetch_all_feeds()
+        except Exception as e:  # noqa: BLE001
+            return SearchResponse(
+                query=query, results=[], provider=self.name,
+                success=False, error_message=f"RSS 抓取失败: {e}",
+            )
+        if not pool:
+            return SearchResponse(
+                query=query, results=[], provider=self.name,
+                success=False, error_message="所有 RSS feed 均不可用",
+            )
+
+        scored: List[Tuple[int, int, Dict[str, str]]] = []
+        for idx, item in enumerate(pool):
+            text = f"{item['title']} {item['description']}".lower()
+            hits = sum(1 for t in terms if t in text)
+            if hits:
+                # 命中数降序，其次保持 feed 原序（feed 内通常时间倒序）
+                scored.append((-hits, idx, item))
+
+        scored.sort(key=lambda x: (x[0], x[1]))
+        results: List[SearchResult] = []
+        for _, _, item in scored[: max(1, int(max_results))]:
+            results.append(SearchResult(
+                title=item["title"],
+                snippet=item["description"][:1000],
+                url=item["link"],
+                source=item["source"],
+                published_date=item["pub"] or None,
+            ))
+
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+
 class SerpAPISearchProvider(BaseSearchProvider):
     """
     SerpAPI 搜索引擎
@@ -2653,6 +2865,12 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
+
+        # 8. RSS 公开新闻聚合（免费无 key）：不进主轮询池（保持付费源的
+        #    轮转位次与调用序列稳定），仅作为 search_comprehensive_intel
+        #    维度内 failover 的末位兜底候选。
+        self._rss_fallback = RSSSearchProvider()
+        logger.info("已启用 RSS 公开新闻聚合（免费无 key，作为情报搜索末位兜底）")
             
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
@@ -4792,35 +5010,60 @@ class SearchService:
             if not available_providers:
                 break
             
-            provider = available_providers[provider_index % len(available_providers)]
-            provider_index += 1
-            
             request_days = (
                 self.ANALYTICAL_INTEL_LOOKBACK_DAYS
                 if dim['name'] in self.ANALYTICAL_INTEL_DIMENSIONS
                 else search_days
             )
 
-            logger.info(
-                "[情报搜索] %s: 使用 %s，请求窗口: 近%s天",
-                dim['desc'],
-                provider.name,
-                request_days,
-            )
+            # 维度内 failover：主选源失败或零结果时，顺延尝试其余源；
+            # 全部主源失败后再落到免费 RSS 兜底（付费源配额耗尽/欠费时
+            # 维度不至于直接空掉）。RSS 不进主池，避免影响轮转位次。
+            total_providers = len(available_providers)
+            candidate_providers: List[BaseSearchProvider] = [
+                available_providers[(provider_index + tried) % total_providers]
+                for tried in range(total_providers)
+            ]
+            rss_fallback = getattr(self, "_rss_fallback", None)
+            if rss_fallback is not None and rss_fallback.is_available:
+                candidate_providers.append(rss_fallback)
+            response: Optional[SearchResponse] = None
+            provider: Optional[BaseSearchProvider] = None
+            for tried, candidate in enumerate(candidate_providers):
+                logger.info(
+                    "[情报搜索] %s: 使用 %s，请求窗口: 近%s天",
+                    dim['desc'],
+                    candidate.name,
+                    request_days,
+                )
+                if isinstance(candidate, TavilySearchProvider) and dim.get('tavily_topic'):
+                    attempt = candidate.search(
+                        dim['query'],
+                        max_results=provider_max_results,
+                        days=request_days,
+                        topic=dim['tavily_topic'],
+                    )
+                else:
+                    attempt = candidate.search(
+                        dim['query'],
+                        max_results=provider_max_results,
+                        days=request_days,
+                    )
+                provider = candidate
+                response = attempt
+                if attempt.success and attempt.results:
+                    break
+                if tried + 1 < len(candidate_providers):
+                    logger.info(
+                        "[情报搜索] %s: %s 无有效结果（%s），切换下一个搜索源",
+                        dim['desc'],
+                        candidate.name,
+                        attempt.error_message or "0 results",
+                    )
+            provider_index += 1
+            if response is None or provider is None:
+                break
 
-            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                response = provider.search(
-                    dim['query'],
-                    max_results=provider_max_results,
-                    days=request_days,
-                    topic=dim['tavily_topic'],
-                )
-            else:
-                response = provider.search(
-                    dim['query'],
-                    max_results=provider_max_results,
-                    days=request_days,
-                )
             if dim['strict_freshness']:
                 filtered_response = self._filter_news_response(
                     response,

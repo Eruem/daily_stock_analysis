@@ -3902,6 +3902,66 @@ class GeminiAnalyzer:
 > 资金流向只能作为价格位置的过滤器：接近压力且主力流出时不得追买；接近支撑且未放量跌破时，优先判断为持有观察、震荡或洗盘观察。
 """
 
+        # 添加加密市场情绪与流动性（FNG + DefiLlama，免费无 key）— crypto/bStock 专用
+        crypto_market_block = (
+            fundamental_context.get("crypto_market", {})
+            if isinstance(fundamental_context, dict)
+            else {}
+        )
+        crypto_market_data = (
+            crypto_market_block.get("data", {})
+            if isinstance(crypto_market_block, dict)
+            else {}
+        )
+        fng_data = (
+            crypto_market_data.get("fear_greed", {})
+            if isinstance(crypto_market_data, dict)
+            else {}
+        )
+        fng_current = fng_data.get("current", {}) if isinstance(fng_data, dict) else {}
+        llama_data = (
+            crypto_market_data.get("defillama", {})
+            if isinstance(crypto_market_data, dict)
+            else {}
+        )
+        # 注意：用“数据非空”而不是 isinstance 判断——
+        # 缺块时 .get("data", {}) 返回空 dict，isinstance 恒为 True，
+        # 会让 A 股等非加密标的也渲染出一段空的“加密市场环境”。
+        if (isinstance(fng_data, dict) and fng_data) or (
+            isinstance(llama_data, dict) and llama_data
+        ):
+            fng_value = fng_current.get("value", "N/A") if isinstance(fng_current, dict) else "N/A"
+            fng_class = (
+                fng_current.get("classification", "N/A")
+                if isinstance(fng_current, dict)
+                else "N/A"
+            )
+            fng_avg7 = fng_data.get("avg_7d", "N/A") if isinstance(fng_data, dict) else "N/A"
+            tvl_usd = llama_data.get("total_tvl_usd") if isinstance(llama_data, dict) else None
+            stable_usd = (
+                llama_data.get("stablecoin_mktcap_usd")
+                if isinstance(llama_data, dict)
+                else None
+            )
+            tvl_text = f"${tvl_usd / 1e9:.1f}B" if isinstance(tvl_usd, (int, float)) else "N/A"
+            stable_text = (
+                f"${stable_usd / 1e9:.1f}B"
+                if isinstance(stable_usd, (int, float))
+                else "N/A"
+            )
+            prompt += f"""
+### 加密市场环境（情绪与流动性）
+| 指标 | 数值 | 决策含义 |
+|------|------|----------|
+| 恐慌贪婪指数(FNG) | {fng_value}（{fng_class}） | 0=极度恐慌, 100=极度贪婪；≥80 过热需防回调，≤20 恐慌区关注逆势机会 |
+| FNG 7日均值 | {fng_avg7} | 与当日值对比可判断情绪是升温还是退潮 |
+| 全链 TVL | {tvl_text} | DeFi 资金水位：持续上升=资金入场，骤降=撤资信号 |
+| 稳定币总市值 | {stable_text} | 场外“弹药”：增长=潜在买盘增强 |
+
+> 加密市场情绪是背景板而非买卖信号：极端贪婪时不追高、极端恐慌时不盲目抄底，
+> 最终决策仍以该标的自身的资金流与价格结构为准。
+"""
+
         # 添加三大法人动向（台股筹码过滤器）— tw-only；仅当 institution 区块 status='ok'
         # 且有净额时注入，其他市场 status='not_supported' 会跳过，严格 additive。
         institution_block = (

@@ -885,7 +885,9 @@ class ComputeEffectiveRegionTestCase(unittest.TestCase):
         with patch.object(trading_calendar, "_XCALS_AVAILABLE", False):
             self.assertEqual(
                 trading_calendar.get_open_markets_today(),
-                {"cn", "hk", "us", "jp", "kr", "tw"},
+                # crypto 为 24/7 市场，无交易所日历，fail-open 时必须包含，
+                # 否则加密货币标的会被交易日过滤误杀
+                {"cn", "hk", "us", "jp", "kr", "tw", "crypto"},
             )
 
     def test_both_all_open_returns_comma_joined_supported_markets(self):

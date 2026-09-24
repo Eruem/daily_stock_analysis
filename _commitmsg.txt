@@ -1,0 +1,26 @@
+﻿feat(crypto): 接入免费加密数据源三件套(RSS+FNG+DefiLlama)
+
+1) data_provider/free_crypto_sources.py (new)
+   - Alternative.me Fear & Greed (7d): market sentiment
+   - DefiLlama total TVL + stablecoin mcap: liquidity water-level
+   - 10min in-process cache, fail-open, no key / no quota
+
+2) base.py: crypto/bStock fundamentals gain crypto_market block
+   (coverage synced)
+
+3) analyzer.py: prompt gains crypto market environment table
+   (FNG/TVL/stablecoins + guidance); rendered only when data
+   non-empty, non-crypto symbols unaffected
+
+4) search_service.py: new RSSSearchProvider (7 public RSS/Atom
+   feeds, concurrent fetch + 10min cache + zh/en alias scoring);
+   registered as standalone _rss_fallback taking part only in
+   search_comprehensive_intel in-dimension failover as last
+   resort, NOT in the main rotation pool (keeps paid-provider
+   rotation order and mock call sequences stable)
+
+5) fix test_trading_calendar fail-open expectation to include
+   crypto (regression from MARKET_TIMEZONE addition)
+
+Tests: search suite 188 passed; full baseline diff shows no
+real regressions (3 flaky ones pass when run alone)
