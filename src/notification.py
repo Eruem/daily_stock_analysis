@@ -927,6 +927,11 @@ class NotificationService(
             "",
         ])
 
+        # 操作速查汇总表（买卖点位一览）
+        self._append_action_summary_table(report_lines, results, report_language)
+        if results:
+            report_lines.extend(["---", ""])
+
         # Issue #262: summary_only 时仅输出摘要，跳过个股详情
         if self._report_summary_only:
             report_lines.extend([f"## 📊 {labels['summary_heading']}", ""])
@@ -1223,6 +1228,64 @@ class NotificationService(
             signal_tag,
         )
 
+    def _append_action_summary_table(
+        self,
+        lines: List[str],
+        results: List[AnalysisResult],
+        report_language: str,
+    ) -> None:
+        """操作速查汇总表（选股多时一眼看清买卖点位）。
+
+        每行一只标的：操作建议（是否买/卖）+ 合适买点 + 合适卖点 + 止损。
+        适用于所有聚合报告入口（dashboard/daily/wechat/brief）。
+        """
+        if not results:
+            return
+
+        if report_language == "en":
+            heading, col_name, col_action = "⚡ Quick Actions", "Symbol", "Action"
+            col_buy, col_sell, col_stop = "Entry", "Target", "Stop Loss"
+        elif report_language == "ko":
+            heading, col_name, col_action = "⚡ 빠른 액션", "종목", "액션"
+            col_buy, col_sell, col_stop = "매수점", "목표가", "손절"
+        else:
+            heading, col_name, col_action = "⚡ 操作速查", "标的", "操作建议"
+            col_buy, col_sell, col_stop = "合适买点", "合适卖点", "止损"
+
+        sorted_results = sorted(
+            results,
+            key=lambda x: x.sentiment_score,
+            reverse=True,
+        )
+
+        lines.extend([
+            f"## {heading}",
+            "",
+            f"| {col_name} | {col_action} | {col_buy} | {col_sell} | {col_stop} |",
+            "|------|------|------|------|------|",
+        ])
+        for r in sorted_results:
+            signal_text, emoji, _ = self._get_signal_level(r)
+            dash = r.dashboard if getattr(r, "dashboard", None) else {}
+            battle = dash.get("battle_plan", {}) if isinstance(dash, dict) else {}
+            sniper = battle.get("sniper_points", {}) if isinstance(battle, dict) else {}
+            sniper = sniper if isinstance(sniper, dict) else {}
+
+            ideal_buy = self._clean_sniper_value(sniper.get("ideal_buy", "N/A"))
+            secondary_buy = self._clean_sniper_value(sniper.get("secondary_buy", "N/A"))
+            buy_text = ideal_buy
+            if secondary_buy and secondary_buy not in ("N/A", "-", ideal_buy):
+                buy_text = f"{ideal_buy} / {secondary_buy}"
+            sell_text = self._clean_sniper_value(sniper.get("take_profit", "N/A"))
+            stop_text = self._clean_sniper_value(sniper.get("stop_loss", "N/A"))
+
+            lines.append(
+                f"| **{self._get_display_name(r, report_language)}**({r.code}) "
+                f"| {emoji} {signal_text} "
+                f"| {buy_text} | {sell_text} | {stop_text} |"
+            )
+        lines.append("")
+
     def generate_dashboard_report(
         self,
         results: List[AnalysisResult],
@@ -1308,6 +1371,11 @@ class NotificationService(
                 "---",
                 "",
             ])
+
+        # === 操作速查汇总表（买卖点位一览，选股多时快速决策）===
+        self._append_action_summary_table(report_lines, results, report_language)
+        if results:
+            report_lines.extend(["---", ""])
 
         # 逐个股票的决策仪表盘（Issue #262: summary_only 时跳过详情）
         if not self._report_summary_only:
@@ -1798,6 +1866,11 @@ class NotificationService(
         ]
         self._append_market_status_line(lines, results, report_language)
 
+        # 操作速查汇总表（买卖点位一览）
+        self._append_action_summary_table(lines, results, report_language)
+        if results:
+            lines.extend(["---", ""])
+
         # 每只股票精简信息（控制长度）
         for result in sorted_results:
             signal_text, emoji, _ = self._get_signal_level(result)
@@ -1883,6 +1956,11 @@ class NotificationService(
             f"> {len(results)} {labels['stock_unit_compact']} | 🟢{buy_count} 🟡{hold_count} 🔴{sell_count}",
         ]
         self._append_market_status_line(lines, results, report_language)
+
+        # 操作速查汇总表（买卖点位一览）
+        self._append_action_summary_table(lines, results, report_language)
+        if results:
+            lines.append("---")
         for r in sorted_results:
             signal_text, emoji, _ = self._get_signal_level(r)
             name = self._get_display_name(r, report_language)
